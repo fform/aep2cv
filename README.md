@@ -6,6 +6,10 @@ Convert Adobe After Effects projects (`.aep`) into Cavalry scenes (`.cv`).
 binary RIFX container, so this works on projects you can no longer open — an
 expired subscription, a machine without AE, a build server.
 
+**Vibe** Project is essentially all vibe coded to get AE projects "sort of" working in Cavalry. See below for a list of things that work or are known not to work. Feel free to send any PRs for missing features or fixes. I was able to get many of my old AE projects working enough to get them going in Cavalry or at least have the ability to fix things without starting from scratch. 
+
+
+
 ## Install
 
 ```sh
