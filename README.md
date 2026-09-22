@@ -72,6 +72,7 @@ print(report.comps, report.layers, report.keyframes)
 | ↳ Repeater | `duplicator` |
 | Transforms and their keyframes | same attributes, with easing preserved |
 | Built-in effects | Cavalry's native filters (see below) |
+| Track matte (alpha / alpha inverted) | the matte layer connected as a clipping mask, hidden |
 
 ### Effects
 
@@ -102,7 +103,8 @@ AE's top-left Y-down origin → Cavalry's centre Y-up origin.
 
 The layer is still created, with its name, timing and transform intact:
 
-- Effects, masks, track mattes and blend modes
+- Third-party effects, layer masks and blend modes
+- Luma track mattes clip by the matte's shape, not its brightness
 - Expressions
 - Cameras and lights
 - Per-character text styling

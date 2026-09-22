@@ -136,6 +136,13 @@ class CvDoc:
         value = self._nodes[node_id]["attributes"].get(attr)
         return len(value.get("list", [])) if isinstance(value, dict) else 0
 
+    def append_slot(self, node_id, attr, slot=None):
+        """Add one compound slot to a list attribute; return its index."""
+        attrs = self._nodes[node_id]["attributes"]
+        entries = attrs.setdefault(attr, {"list": []})["list"]
+        entries.append(slot or {})
+        return len(entries) - 1
+
     def context_filter(self, node_id, values):
         self._nodes[node_id]["contextFilter"] = list(values)
 

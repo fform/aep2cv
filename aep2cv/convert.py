@@ -2,8 +2,9 @@
 
 What survives the trip, and what does not, is documented in README.md. The
 short version: composition settings, the layer tree (types, order, parenting),
-layer in/out points, transforms and transform keyframes. Effects, masks and
-shape-layer contents do not - they have no faithful Cavalry equivalent.
+layer in/out points, transforms and transform keyframes, and track mattes (as
+clipping masks). Layer masks do not survive - they have no faithful Cavalry
+equivalent.
 """
 
 from __future__ import annotations
@@ -163,6 +164,50 @@ class Converter:
             else:
                 self.doc.add_child(comp_node, node)
                 self.doc.set(node, hierarchy=cvdoc.boolean(False))
+
+        # Track mattes last, once every layer has a node: AE 23+ lets a layer
+        # use any layer in the comp as its matte, not just the one above it.
+        for layer in comp.layers:
+            if getattr(layer, "has_track_matte", False):
+                self.apply_track_matte(comp, layer, made)
+
+    # AE matte types that invert -> Cavalry's subtracting clipping-mask mode.
+    # The other mode is left unset, and Cavalry's default mode clips to the
+    # inside of the mask.
+    MASK_SUBTRACT = 1
+
+    def apply_track_matte(self, comp, layer, made):
+        """AE track matte -> a Cavalry clipping mask.
+
+        Cavalry clips by the matte's geometry rather than its rendered alpha,
+        which gives the same result for the usual case: a solid shape cutting
+        footage to a frame or a rounded rectangle. The mask is connected
+        where the matte layer already sits in the comp, so the two layers keep
+        their own transforms, just as in AE.
+        """
+        node = made.get(layer.index)
+        matte = layer.track_matte_layer
+        matte_node = made.get(matte.index) if matte is not None else None
+        name = layer.name or type(layer).__name__
+        if node is None or matte_node is None:
+            self.report.skip(comp.name, name, "track matte layer was not converted")
+            return
+        if self.doc.node_type(node) in ("rectangleShape", "null"):
+            self.report.skip(comp.name, name,
+                             "track matte not applied - this layer cannot take masks")
+            return
+
+        kind = getattr(layer.track_matte_type, "name", "")
+        slot = {}
+        if kind.endswith("INVERTED"):
+            slot = {"compound": {"mode": cvdoc.integer(self.MASK_SUBTRACT)}}
+        if kind.startswith("LUMA"):
+            self.report.note(
+                "Luma track mattes are converted as alpha clipping masks - "
+                "Cavalry clips by the matte's shape, not its brightness.")
+
+        index = self.doc.append_slot(node, "masks", slot)
+        self.doc.connect(f"{matte_node}.id", f"{node}.masks.{index}.id")
 
     def make_layer(self, comp, comp_node, layer):
         kind = type(layer).__name__
@@ -498,7 +543,9 @@ class Converter:
         A visibility curve is two keyframes - 1.0 where the layer switches on,
         -1.0 where it switches off - driving the layer's ``on`` attribute.
         """
-        if not layer.enabled:
+        # AE never draws a track matte itself. In Cavalry a hidden shape still
+        # clips, so the matte stays off rather than following its in/out.
+        if not layer.enabled or getattr(layer, "is_track_matte", False):
             self.doc.set(node, on=cvdoc.boolean(False))
             return
 
