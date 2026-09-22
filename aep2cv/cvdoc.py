@@ -125,6 +125,9 @@ class CvDoc:
     def set_raw(self, node_id, key, value):
         self._nodes[node_id]["attributes"][key] = value
 
+    def node_type(self, node_id):
+        return self._nodes[node_id]["nodeType"]
+
     def list_children(self, node_id):
         return self._children.get(node_id, [])
 

@@ -71,6 +71,29 @@ print(report.comps, report.layers, report.keyframes)
 | ↳ Rounded Corners / Offset Paths | `round` / `pathOffsetBehaviour` deformers |
 | ↳ Repeater | `duplicator` |
 | Transforms and their keyframes | same attributes, with easing preserved |
+| Built-in effects | Cavalry's native filters (see below) |
+
+### Effects
+
+Built-in AE effects map onto Cavalry's own filters, so they stay editable:
+
+| After Effects | Cavalry |
+|---|---|
+| Gaussian Blur, Camera Lens Blur | `gaussianBlurFilter` |
+| Fast Box Blur, Fast Blur | `blurFilter` |
+| Drop Shadow | `dropShadowFilter` (direction + distance → offset vector) |
+| Fill | `fill` |
+| Hue/Saturation | `hueSaturationLightness` |
+| Glow | `glowFilter` |
+| Levels | `levels` |
+| Brightness & Contrast | `brightnessAndContrast` |
+| Invert, Black & White, Tritone | `invert`, `blackAndWhite`, `triToneFilter` |
+| Posterize, Threshold, Sharpen | `posterizeFilter`, `thresholdFilter`, `sharpenFilter` |
+| Linear Wipe, Radial Wipe, Venetian Blinds | `linearWipe`, `radialWipe`, `venetianBlinds` |
+
+Anything else — including all third-party plugins — is reported by name and
+left off. Cavalry cannot host AE effects: its own plugins are SkSL shaders,
+and it has no OpenFX support.
 
 Units are converted throughout: scale `0–100` → `0–1`, seconds → frames, and
 AE's top-left Y-down origin → Cavalry's centre Y-up origin.
@@ -118,6 +141,7 @@ python -m venv .venv && .venv/bin/pip install -e .
 aep2cv/cvdoc.py        .cv document builder (nodes, hierarchy, connections)
 aep2cv/convert.py      the AE → Cavalry mapping
 aep2cv/shapes.py       shape layers: geometry, paint and modifiers
+aep2cv/effects.py      built-in AE effects → Cavalry filters
 aep2cv/fonts.py        resolves AE PostScript names to family + style
 aep2cv/vector.py       SVG, and .ai/.eps/.pdf conversion
 aep2cv/cli.py          command line entry point

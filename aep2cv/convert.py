@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import py_aep
 
 from . import cvdoc, fonts, vector
+from .effects import EffectBuilder
 from .shapes import ShapeBuilder
 from .cvdoc import CvDoc
 
@@ -233,6 +234,8 @@ class Converter:
 
         self.apply_transform(comp, layer, node, source_size, origin_offset)
         self.apply_timing(comp, comp_node, layer, node)
+        EffectBuilder(self, comp, comp_node).apply(
+            layer, node, self.doc.node_type(node))
         return node
 
     def make_vector_layer(self, name, file_source):
