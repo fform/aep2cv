@@ -46,6 +46,8 @@ def main(argv=None):
             print(f"  converted {len(report.vectorised)} vector file(s) to SVG")
         if report.gathered:
             print(f"  gathered {len(report.gathered)} media file(s) into {gather}")
+        if report.expressions_resolved:
+            print(f"  evaluated {report.expressions_resolved} expression(s) to fixed values")
         for note in report.notes:
             print(f"  note: {note}")
     for skipped in report.skipped:
@@ -64,6 +66,17 @@ def main(argv=None):
               f"{INSTALL_HINT}:", file=sys.stderr)
         for v in report.unconverted_vectors:
             print(f"    not vectorised: {v}", file=sys.stderr)
+    if report.unresolved_expressions:
+        # Grouped by reason: template rigs repeat the same expression per layer.
+        by_reason = {}
+        for where, reason in report.unresolved_expressions:
+            by_reason.setdefault(reason, []).append(where)
+        print(f"  NOTE: {len(report.unresolved_expressions)} expression(s) could not be "
+              f"evaluated - those properties keep their pre-expression value:",
+              file=sys.stderr)
+        for reason, places in by_reason.items():
+            more = f" (+{len(places) - 1} more)" if len(places) > 1 else ""
+            print(f"    {reason}: {places[0]}{more}", file=sys.stderr)
     if report.missing:
         # Cavalry renders nothing for media it cannot find, and says nothing.
         print(f"  WARNING: {len(report.missing)} referenced file(s) not found on disk - "

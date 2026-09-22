@@ -77,6 +77,7 @@ print(report.comps, report.layers, report.keyframes)
 | Transforms and their keyframes | same attributes, with easing preserved |
 | Built-in effects | Cavalry's native filters (see below) |
 | Track matte (alpha / alpha inverted) | the matte layer connected as a clipping mask, hidden |
+| Expressions that resolve to a fixed value | the value they produce (see below) |
 
 ### Effects
 
@@ -95,10 +96,30 @@ Built-in AE effects map onto Cavalry's own filters, so they stay editable:
 | Invert, Black & White, Tritone | `invert`, `blackAndWhite`, `triToneFilter` |
 | Posterize, Threshold, Sharpen | `posterizeFilter`, `thresholdFilter`, `sharpenFilter` |
 | Linear Wipe, Radial Wipe, Venetian Blinds | `linearWipe`, `radialWipe`, `venetianBlinds` |
+| Tint | `gradientMapFilter` — black and white colours as a two-stop gradient |
+| Transform | nested `group`s — the layer transform outside, the effect's inside |
+| Slider, Checkbox, Color, Angle, Point controls | nothing to draw; read by expressions |
 
 Anything else — including all third-party plugins — is reported by name and
 left off. Cavalry cannot host AE effects: its own plugins are SkSL shaders,
 and it has no OpenFX support.
+
+### Expressions
+
+Cavalry cannot run AE expressions, and an .aep only stores the value a
+property had before its expression ran. Template rigs lean on this heavily:
+colours, glow and shadow settings, flips and global scale all come from a
+`Controller` layer through expressions like
+`thisComp.layer("Controller").effect("Glow Radius")(1)`.
+
+aep2cv evaluates every expression that reduces to a fixed value — links to
+controls and other properties, arithmetic (with AE's array maths), ternaries,
+local variables, `Math`, `clamp`, `linear` and `content()` — and writes the
+result. A keyframed property whose expression reads `value` is evaluated per
+keyframe, so `value * slider` keeps its animation. Expressions that depend on
+time (`time`, `wiggle`, keyframed references) or on more of the language
+(functions, `if`, loops) keep the pre-expression value and are listed in the
+run report, grouped by reason.
 
 Units are converted throughout: scale `0–100` → `0–1`, seconds → frames, and
 AE's top-left Y-down origin → Cavalry's centre Y-up origin.
@@ -109,7 +130,7 @@ The layer is still created, with its name, timing and transform intact:
 
 - Third-party effects, layer masks and blend modes
 - Luma track mattes clip by the matte's shape, not its brightness
-- Expressions
+- Time-dependent or script-heavy expressions (listed in the run report)
 - Cameras and lights
 - Per-character text styling
 - Shape modifiers with no Cavalry equivalent — Twist, Pucker & Bloat, Roughen

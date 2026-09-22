@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import py_aep
 
-from . import cvdoc, fonts, vector
+from . import cvdoc, expressions, fonts, vector
 from .effects import EffectBuilder
 from .shapes import ShapeBuilder
 from .cvdoc import CvDoc
@@ -30,6 +30,7 @@ ROTATION_X = "ADBE Rotate X"
 ROTATION_Y = "ADBE Rotate Y"
 OPACITY = "ADBE Opacity"
 TRANSFORM_GROUP = "ADBE Transform Group"
+TRANSFORM_EFFECT = "ADBE Geometry2"
 
 
 
@@ -47,6 +48,8 @@ class Report:
     unresolved_fonts: list = field(default_factory=list)
     vectorised: list = field(default_factory=list)
     unconverted_vectors: list = field(default_factory=list)
+    expressions_resolved: int = 0
+    unresolved_expressions: list = field(default_factory=list)
 
     def skip(self, comp, layer, why):
         self.skipped.append(f"{comp} / {layer}: {why}")
@@ -89,7 +92,8 @@ class Converter:
     @staticmethod
     def _anchor_of(layer):
         try:
-            a = layer.property(TRANSFORM_GROUP).property(ANCHOR).value
+            a = expressions.effective(
+                layer.property(TRANSFORM_GROUP).property(ANCHOR)).value
             return float(a[0]), float(a[1])
         except Exception:
             return 0.0, 0.0
@@ -104,17 +108,27 @@ class Converter:
         doc.add_scene_scaffolding()
 
         comps = list(self.project.compositions)
-        # Compositions first, so precomp layers have something to point at.
-        for comp in comps:
-            node = self.make_comp(comp)
-            self.comp_nodes[comp.id] = node
-            doc.add_child(doc.root_asset, node)
-        for comp in comps:
-            self.populate_comp(comp)
+        # Every property read below goes through the expression resolver.
+        resolver = expressions.Resolver(comps)
+        expressions.activate(resolver)
+        try:
+            # Compositions first, so precomp layers have something to point at.
+            for comp in comps:
+                node = self.make_comp(comp)
+                self.comp_nodes[comp.id] = node
+                doc.add_child(doc.root_asset, node)
+            for comp in comps:
+                self.populate_comp(comp)
+        finally:
+            expressions.activate(None)
 
         if comps:
             doc.active_comp = self.comp_nodes[comps[0].id]
         self.report.missing = sorted(self.missing)
+        self.report.expressions_resolved = resolver.resolved
+        self.report.unresolved_expressions = [
+            (f"{comp} / {layer} / {path}", reason)
+            for comp, layer, path, _prop, reason in resolver.unresolved]
         return doc, self.report
 
     def make_comp(self, comp):
@@ -277,11 +291,168 @@ class Converter:
             node = self.doc.create("null", name)
             self.report.skip(comp.name, name, f"unhandled layer kind {kind} - placed as a null")
 
-        self.apply_transform(comp, layer, node, source_size, origin_offset)
+        kind_of_node = self.doc.node_type(node)
+        hosts = None
+        transforms = self.transform_effects(layer) if kind_of_node != "null" else []
+        if transforms:
+            hosts = self.nest_transform_effects(
+                comp, comp_node, layer, node, name, transforms,
+                source_size, origin_offset)
+            if node in self.shader_of:
+                self.shader_of[hosts[-1]] = self.shader_of[node]
+            node = hosts[-1]
+        else:
+            self.apply_transform(comp, layer, node, source_size, origin_offset)
         self.apply_timing(comp, comp_node, layer, node)
         EffectBuilder(self, comp, comp_node).apply(
-            layer, node, self.doc.node_type(node))
+            layer, hosts[0] if hosts else node, kind_of_node, hosts)
         return node
+
+    # -- the Transform effect -----------------------------------------------
+    @staticmethod
+    def transform_effects(layer):
+        try:
+            parade = layer.property("ADBE Effect Parade")
+        except Exception:
+            return []
+        return [e for e in (parade or [])
+                if getattr(e, "match_name", "") == TRANSFORM_EFFECT
+                and getattr(e, "enabled", True)]
+
+    def nest_transform_effects(self, comp, comp_node, layer, content, name,
+                               transforms, source_size, origin_offset):
+        """AE's Transform effect transforms the layer inside its own space,
+        before the layer transform. Cavalry has no such filter, but nesting
+        gives the same result: the layer becomes a group carrying the layer
+        transform, with one group per further Transform effect inside it, and
+        the content innermost carrying the first.
+
+        Every group sits at its reference point with no pivot, so each child
+        is placed relative to the point it transforms about: the layer's
+        anchor for the outermost, the effect's anchor point for the rest.
+
+        Returns the chain [content, inner groups..., layer group].
+        """
+        chain = [content]
+        for effect in transforms[1:]:
+            chain.append(self.doc.create("group", f"{name} {effect.name}"))
+        outer = self.doc.create("group", name)
+        chain.append(outer)
+        for child, parent in zip(chain, chain[1:]):
+            self.doc.add_child(parent, child)
+
+        self.apply_transform(comp, layer, outer, None, pivot=False)
+
+        # Effect points on a layer with a source are in source pixels, like
+        # its anchor. Shape and text layers have no source: AE measures their
+        # effect points from the corner of a layer-sized box centred on the
+        # layer's origin, so the default centre [w/2, h/2] is the origin.
+        if getattr(layer, "source", None) is None:
+            shift = (float(layer.width) / 2.0, float(layer.height) / 2.0)
+        else:
+            shift = (0.0, 0.0)
+
+        # Each node is placed relative to its parent's reference point.
+        reference = self._anchor_of(layer)
+        for i in range(len(transforms) - 1, -1, -1):
+            effect = transforms[i]
+            node = chain[i]
+            innermost = i == 0
+            reference = self.apply_effect_transform(
+                comp, comp_node, effect, node, reference,
+                source_size if innermost else None,
+                origin_offset if innermost else (0.0, 0.0),
+                pivot=innermost, shift=shift)
+        return chain
+
+    def apply_effect_transform(self, comp, comp_node, effect, node, reference,
+                               source_size, origin_offset, pivot, shift=(0.0, 0.0)):
+        """One Transform effect onto one node; returns its anchor point, the
+        reference its children are placed from."""
+        def prop(match_name):
+            try:
+                return expressions.effective(effect.property(match_name))
+            except Exception:
+                return None
+
+        anchor = prop("ADBE Geometry2-0001")
+        pos = prop("ADBE Geometry2-0002")
+        height = prop("ADBE Geometry2-0003")
+        width = prop("ADBE Geometry2-0004")
+        skew = prop("ADBE Geometry2-0005")
+        rot = prop("ADBE Geometry2-0007")
+        opacity = prop("ADBE Geometry2-0008")
+        uniform = prop("ADBE Geometry2-0011")
+        if uniform is not None and uniform.value:
+            width = height
+
+        rx, ry = reference
+        # Into the layer's own space, where the reference point lives.
+        rx, ry = rx + shift[0], ry + shift[1]
+        ox, oy = origin_offset
+        a = anchor.value if anchor is not None else (rx, ry)
+        if anchor is not None and anchor.is_time_varying and not pivot:
+            self.report.note(
+                "Transform effect: an animated anchor point on a nested "
+                "Transform effect converts at its first value.")
+
+        def place(v):
+            return self.to_cv_point(v[0] - rx + ox, v[1] - ry + oy, comp, True)
+
+        if pos is not None:
+            if pos.is_time_varying:
+                self.animate(comp, comp_node, node, pos, [
+                    ("position.x", lambda v: place(v)[0]),
+                    ("position.y", lambda v: place(v)[1])])
+            else:
+                x, y = place(pos.value)
+                self.doc.set(node, position=cvdoc.double3(x, y, 0.0))
+
+        for attr, p in (("scale.x", width), ("scale.y", height)):
+            if p is None:
+                continue
+            if p.is_time_varying:
+                self.animate(comp, comp_node, node, p, [(attr, lambda v: v / 100.0)])
+        # Written whole even when one axis animates - its curve overrides it.
+        sx = float(width.value) if width is not None else 100.0
+        sy = float(height.value) if height is not None else 100.0
+        if sx != 100.0 or sy != 100.0:
+            self.doc.set(node, scale=cvdoc.scale2(sx / 100.0, sy / 100.0))
+
+        if rot is not None:
+            if rot.is_time_varying:
+                self.animate(comp, comp_node, node, rot,
+                             [("rotation.z", lambda v: self.to_cv_angle(v))])
+            elif rot.value:
+                self.doc.set(node, rotation=cvdoc.double3(
+                    0.0, 0.0, self.to_cv_angle(rot.value)))
+
+        if opacity is not None:
+            if opacity.is_time_varying:
+                self.animate(comp, comp_node, node, opacity, [("opacity", lambda v: v)])
+            elif abs(opacity.value - 100.0) > 1e-6:
+                self.doc.set(node, opacity=cvdoc.double(opacity.value))
+
+        if skew is not None and (skew.is_time_varying or skew.value):
+            self.report.note("Transform effect: skew is not converted.")
+
+        if pivot and anchor is not None:
+            def to_pivot(v):
+                v = (v[0] - shift[0], v[1] - shift[1])
+                if source_size:
+                    px, py = v[0] - source_size[0] / 2.0, v[1] - source_size[1] / 2.0
+                else:
+                    px, py = v[0], v[1]
+                return px, (-py if self.flip_y else py)
+            if anchor.is_time_varying:
+                self.animate(comp, comp_node, node, anchor, [
+                    ("pivot.x", lambda v: to_pivot(v)[0]),
+                    ("pivot.y", lambda v: to_pivot(v)[1])])
+            else:
+                px, py = to_pivot(a)
+                if abs(px) > 1e-6 or abs(py) > 1e-6:
+                    self.doc.set(node, pivot=cvdoc.double2(px, py))
+        return float(a[0]) - shift[0], float(a[1]) - shift[1]
 
     def make_vector_layer(self, name, file_source):
         """Vector artwork becomes real geometry via Cavalry's SVG shape.
@@ -578,7 +749,8 @@ class Converter:
         return self.doc.create("keyframe", None, attrs)
 
     # -- transforms -------------------------------------------------------
-    def apply_transform(self, comp, layer, node, source_size, origin_offset=(0.0, 0.0)):
+    def apply_transform(self, comp, layer, node, source_size, origin_offset=(0.0, 0.0),
+                        pivot=True):
         group = layer.property(TRANSFORM_GROUP)
         if group is None:
             return
@@ -587,7 +759,7 @@ class Converter:
 
         def prop(match_name):
             try:
-                return group.property(match_name)
+                return expressions.effective(group.property(match_name))
             except Exception:
                 return None
 
@@ -624,7 +796,7 @@ class Converter:
         if opacity is not None and not opacity.is_time_varying and not is_null:
             if abs(opacity.value - 100.0) > 1e-6:
                 self.doc.set(node, opacity=cvdoc.double(opacity.value))
-        if anchor is not None:
+        if anchor is not None and pivot:
             a = anchor.value
             if source_size:
                 # Footage and solids are drawn from their centre.
@@ -659,6 +831,7 @@ class Converter:
         Static values are written directly; animated ones become an
         animationCurve, so shape modifiers animate like everything else.
         """
+        prop = expressions.effective(prop)
         if prop is None:
             return
         if prop.is_time_varying:
@@ -673,6 +846,7 @@ class Converter:
 
     def animate(self, comp, comp_node, node, prop, channels):
         """One Cavalry animationCurve per scalar channel."""
+        prop = expressions.effective(prop)
         keys = list(prop.keyframes)
         if not keys:
             return

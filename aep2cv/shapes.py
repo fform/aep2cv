@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 
-from . import cvdoc
+from . import cvdoc, expressions
 
 # -- AE match names --------------------------------------------------------
 GROUP = "ADBE Vector Group"
@@ -67,14 +67,14 @@ CAP_JOIN = {1: 0, 2: 1, 3: 2}
 
 def _val(group, match_name):
     try:
-        return group.property(match_name).value
+        return expressions.effective(group.property(match_name)).value
     except Exception:
         return None
 
 
 def _prop(group, match_name):
     try:
-        return group.property(match_name)
+        return expressions.effective(group.property(match_name))
     except Exception:
         return None
 

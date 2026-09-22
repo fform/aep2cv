@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from . import cvdoc
+from . import cvdoc, expressions
 
 
 def _param(effect, *names):
@@ -25,9 +25,9 @@ def _param(effect, *names):
     wanted = {n.lower() for n in names}
     for prop in effect:
         if (getattr(prop, "match_name", "") or "").lower() in wanted:
-            return prop
+            return expressions.effective(prop)
         if (getattr(prop, "name", "") or "").lower() in wanted:
-            return prop
+            return expressions.effective(prop)
     return None
 
 
@@ -46,11 +46,33 @@ def _colour(rgba, alpha=None):
     return cvdoc.color(rgba[0] * 255, rgba[1] * 255, rgba[2] * 255, a)
 
 
-def _opacity_fraction(value):
-    """AE stores some opacities 0-1 and others 0-100; normalise to 0-1."""
-    if value is None:
-        return 1.0
-    return value / 100.0 if value > 1.0 else float(value)
+def _fraction(prop, default=1.0):
+    """A percentage parameter as 0-1.
+
+    AE stores these on different scales - Drop Shadow opacity is 0-255, Fill
+    opacity 0-1, Tint amount 0-100 - and says which through ``max_value``.
+    """
+    if prop is None:
+        return default
+    try:
+        value = float(prop.value)
+        top = float(prop.max_value) if prop.has_max else 100.0
+    except (TypeError, ValueError):
+        return default
+    return value / top if top else default
+
+# Expression controls hold values for expressions to read; they draw nothing.
+CONTROLS = {
+    "ADBE Slider Control", "ADBE Point Control", "ADBE Point3D Control",
+    "ADBE Angle Control", "ADBE Checkbox Control", "ADBE Color Control",
+    "ADBE Layer Control", "ADBE Dropdown Control",
+}
+
+# The Transform effect is built by the converter as a nested group.
+TRANSFORM_EFFECT = "ADBE Geometry2"
+
+# AE Glow Operation -> Cavalry blend mode, where one matches.
+GLOW_OPERATIONS = {2: 3, 3: 12, 5: 14, 6: 15}
 
 
 class EffectBuilder:
@@ -113,7 +135,6 @@ class EffectBuilder:
         "ADBE Echo": "Echo",
         "ADBE Displacement Map": "Displacement Map",
         "ADBE Corner Pin": "Corner Pin",
-        "ADBE Transform": "Transform (effect)",
     }
 
     def __init__(self, converter, comp, comp_node):
@@ -122,8 +143,13 @@ class EffectBuilder:
         self.comp = comp
         self.comp_node = comp_node
 
-    def apply(self, layer, node, layer_kind):
-        """Attach every convertible effect on this layer."""
+    def apply(self, layer, node, layer_kind, hosts=None):
+        """Attach every convertible effect on this layer.
+
+        ``hosts`` is the chain of nodes the converter built for Transform
+        effects: the content, one group per Transform effect, then the layer.
+        A filter goes on the first node that follows it in AE's effect order.
+        """
         if layer_kind == "null":
             return  # a null draws nothing, so filters have nothing to act on
         try:
@@ -133,13 +159,22 @@ class EffectBuilder:
         if not parade:
             return
 
+        hosts = hosts or [node]
+        stage = 0
         for effect in parade:
+            if not getattr(effect, "enabled", True):
+                continue
             match_name = getattr(effect, "match_name", "") or ""
+            if match_name in CONTROLS:
+                continue
+            if match_name == TRANSFORM_EFFECT and stage + 1 < len(hosts):
+                stage += 1
+                continue
             filter_node = self.build(effect, match_name)
             if filter_node is None:
                 self.report_unconverted(effect, match_name)
                 continue
-            self.attach(node, filter_node)
+            self.attach(hosts[stage], filter_node)
 
     def build(self, effect, match_name):
         if match_name == "ADBE Drop Shadow":
@@ -156,6 +191,8 @@ class EffectBuilder:
             return self.tritone(effect)
         if match_name == "ADBE Glo2":
             return self.glow(effect)
+        if match_name == "ADBE Tint":
+            return self.tint(effect)
         if match_name in self.SIMPLE:
             return self.simple(effect, match_name)
         return None
@@ -186,11 +223,11 @@ class EffectBuilder:
 
     def drop_shadow(self, effect):
         """AE gives a direction and distance; Cavalry wants an offset vector."""
-        node = self.doc.create("dropShadowFilter", "Drop Shadow")
+        node = self.doc.create("dropShadowFilter", getattr(effect, "name", None) or "Drop Shadow")
         colour = _value(effect, "Shadow Color", default=(0.0, 0.0, 0.0, 1.0))
-        opacity = _value(effect, "Opacity", default=100.0)
-        self.doc.set(node, shadowColor=_colour(
-            colour, _opacity_fraction(opacity) * 255))
+        opacity = _fraction(_param(effect, "Opacity"), 0.5)
+        self.doc.set(node, shadowColor=_colour(colour, opacity * 255))
+        self.note_static(effect, "Shadow Color", "Opacity")
 
         direction = float(_value(effect, "Direction", default=135.0) or 0.0)
         distance = float(_value(effect, "Distance", default=0.0) or 0.0)
@@ -202,17 +239,31 @@ class EffectBuilder:
             dy = -dy
         self.doc.set(node, offset=cvdoc.double2(dx, dy))
 
-        softness = float(_value(effect, "Softness", default=0.0) or 0.0)
         # AE softness spans the whole blur; Cavalry's amount is a radius.
-        radius = softness / 2.0
-        self.doc.set(node, amount=cvdoc.double2(radius, radius))
+        softness = _param(effect, "Softness")
+        if softness is not None and softness.is_time_varying:
+            self.conv.animate(self.comp, self.comp_node, node, softness, [
+                ("amount.x", lambda v: v / 2.0), ("amount.y", lambda v: v / 2.0)])
+        else:
+            radius = float(_value(effect, "Softness", default=0.0) or 0.0) / 2.0
+            self.doc.set(node, amount=cvdoc.double2(radius, radius))
         return node
+
+    def note_static(self, effect, *names):
+        """Colours convert at one value; say so when AE animates them."""
+        for name in names:
+            prop = _param(effect, name)
+            if prop is not None and prop.is_time_varying:
+                self.conv.report.note(
+                    f"{getattr(effect, 'name', '') or 'Effect'}: animated "
+                    f"{name} converted at its first keyframe.")
 
     def fill(self, effect):
         node = self.doc.create("fill", "Fill")
         colour = _value(effect, "Color", default=(0.0, 0.0, 0.0, 1.0))
-        opacity = _opacity_fraction(_value(effect, "Opacity", default=1.0))
+        opacity = _fraction(_param(effect, "Opacity"))
         self.doc.set(node, fillColor=_colour(colour, opacity * 255))
+        self.note_static(effect, "Color")
         return node
 
     def hue_saturation(self, effect):
@@ -240,10 +291,40 @@ class EffectBuilder:
         node = self.doc.create("glowFilter", "Glow")
         radius = _value(effect, "Glow Radius")
         if radius:
-            self.doc.set(node, blur=cvdoc.int2(int(radius), int(radius)))
-        intensity = _value(effect, "Glow Intensity")
-        if intensity:
-            self.doc.set(node, intensity=cvdoc.double(intensity))
+            r = int(round(radius))
+            self.doc.set(node, blur=cvdoc.int2(r, r))
+        self.conv.set_or_animate(self.comp, self.comp_node, node, "intensity",
+                                 _param(effect, "Glow Intensity"))
+        # Glow Colors 2 is "A & B Colors": tint the glow with colour A.
+        if _value(effect, "Glow Colors") == 2:
+            colour = _value(effect, "Color A")
+            if colour:
+                self.doc.set(node, glowColor=_colour(colour))
+        operation = _value(effect, "Glow Operation")
+        if operation in GLOW_OPERATIONS:
+            self.doc.set(node, blendMode=cvdoc.enum(GLOW_OPERATIONS[operation]))
+        self.conv.report.note(
+            "Glow converts radius, intensity, A colour and operation; Cavalry's "
+            "glow has no threshold, so its spread may differ.")
+        return node
+
+    def tint(self, effect):
+        """Tint maps luminance from one colour to another: a two-stop
+        Gradient Map."""
+        node = self.doc.create("gradientMapFilter", "Tint")
+        stops = []
+        for position, name, default in ((0.0, "Map Black To", (0, 0, 0, 1)),
+                                        (1.0, "Map White To", (1, 1, 1, 1))):
+            colour = _value(effect, name, default=default)
+            entry = {"color": _colour(colour)}
+            if position:
+                entry["position"] = cvdoc.double(position)
+            stops.append({"compound": entry})
+        self.doc.set_raw(node, "gradient", {"list": stops})
+        amount = _fraction(_param(effect, "Amount to Tint"))
+        if amount < 1.0:
+            self.doc.set(node, alpha=cvdoc.double(amount * 100.0))
+        self.note_static(effect, "Map Black To", "Map White To")
         return node
 
     def attach(self, layer_node, filter_node):
