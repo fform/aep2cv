@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aep2cv"
+version = "0.1.0"
+description = "Convert Adobe After Effects projects (.aep) to Cavalry scenes (.cv), without needing After Effects"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "fform" }]
+keywords = ["after-effects", "aep", "cavalry", "motion-graphics", "converter"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "py-aep>=0.16",
+  # Used directly to read installed fonts; also a py-aep dependency.
+  "fonttools>=4.38",
+]
+
+[project.urls]
+Homepage = "https://github.com/fform/aep2cv"
+Issues = "https://github.com/fform/aep2cv/issues"
+
+[project.scripts]
+aep2cv = "aep2cv.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aep2cv"]
+
+[tool.hatch.build.targets.sdist]
+include = ["aep2cv", "README.md", "LICENSE"]
